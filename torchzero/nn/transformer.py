@@ -50,6 +50,11 @@ class MultiHeadAttention(nn.Module):
         self.scale = 1 / torch.sqrt(torch.tensor(d_k).float())
 
     def forward(self, X, mask=None):
+        """
+        X - tensor of shape batch_size, sequence_length, input_dim
+        mask - tensor of shape batch_size, n_heads, sequence_length, sequence_length
+        """
+
         B, n_tokens, d = X.shape
         assert (
             d == self.d_model
@@ -65,12 +70,6 @@ class MultiHeadAttention(nn.Module):
 
         attn_scores = (Q @ K_t * self.scale)
         if mask is not None: 
-            # we might have to repeat the mask along the batch and head dimensions
-            while mask.ndim < attn_scores.ndim: 
-                current_dim_added = attn_scores.ndim - mask.ndim - 1 
-                repeats = attn_scores.shape[current_dim_added]
-                mask = mask.repeat([repeats] + [1]* mask.ndim )
-
             attn_scores[mask == 0] = -INF
 
         attn = attn_scores.softmax(-1)
@@ -85,7 +84,7 @@ class MultiHeadAttention(nn.Module):
         return layer_output, attn
         
 
-class BasicTransformer(nn.Module): 
+class Transformer(nn.Module): 
     def __init__(self, n_layers=6, n_heads=8, d_model=512, d_feed_forward=768, dropout=0.1):
         super().__init__()
 
@@ -133,6 +132,7 @@ class BasicTransformer(nn.Module):
             
             ff_out = self.feed_forward_blocks[i](X)
             X = self.ff_layernorms[i](X + ff_out)
+            X = self.dropout(X)
 
             layer_outputs.append(X)
             attentions.append(attn)
@@ -142,3 +142,10 @@ class BasicTransformer(nn.Module):
             'layer_outputs': layer_outputs
         }
             
+
+# TODO
+class TransformerForSequencePrediction(nn.Module):
+    def __init__(self, vocab_size, pad_token, n_layers=6, n_heads=8, d_model=512, d_feed_forward=768, dropout=0.1): 
+        self.embeddings = nn.Embedding(
+            vocab_size, d_model, pad_token
+        )
