@@ -17,9 +17,12 @@ class Tokenizer:
     TOKEN_KEY = 0
 
     def __init__(self, vocab: list[str], use_unknown_token=True):
+        assert len(set(vocab)) == len(vocab), 'There are duplicate words in the vocabulary!'
+
         self._token_graph = {}
         self.use_unknown_token = use_unknown_token
         self._unknown_token = 0
+        self.vocab = []
         
         self.idx2vocab = {}
         self.idx2vocab[self._unknown_token] = '<UNK>'
@@ -27,6 +30,12 @@ class Tokenizer:
         for i, word in enumerate(vocab): 
             self.add_token(word, i+1)
     
+    @property
+    def vocab2idx(self):
+        return {
+            v: k for k, v in self.idx2vocab.items()
+        }
+
     def add_token(self, word, i=None): 
         i = i if i is not None else len(self.idx2vocab)
         if i in self.idx2vocab: 
@@ -37,25 +46,32 @@ class Tokenizer:
                 d = d.setdefault(letter, {}) 
             d[self.TOKEN_KEY] = i 
         self.idx2vocab[i] = word
+        self.vocab.append(word)
 
     def encode(self, text) -> list[int]: 
+        #TODO this doesn't work. 
+
         tokens = []
         i = 0
         while i < len(text):  
-            d = self._token_graph
-            current_word = text[i]
-            while i < len(text) - 1 and text[i] in d: 
-                d = d[text[i]]
-                i += 1
+            nodes = [self._token_graph]
+            current_word = ""
+            while i < len(text) and text[i] in nodes[-1]: 
+                nodes.append(nodes[-1][text[i]])
                 current_word += text[i]
-            if 0 not in d: 
-                if self.use_unknown_token: 
+                i += 1
+            while 0 not in nodes[-1]:
+                nodes.pop()
+                current_word = current_word[:-1]
+                i -= 1
+            if current_word == "":
+                if self.use_unknown_token:
                     tokens.append(self._unknown_token)
                     i += 1
-                else: 
+                else:
                     raise ValueError(f"Found unknown token {current_word}!")
-            else: 
-                tokens.append(d[0])
+            else:
+                tokens.append(nodes[-1][0])
         return tokens
     
     def decode(self, encoding): 
@@ -87,10 +103,11 @@ class BytePairEncodingAlgorithm:
         self.allow_whitespace = allow_whitespace
         self.max_tokens = max_tokens
 
-    def _fit_v2(self, text, max_tokens=1000): 
+    def fit_v2(self, text): 
         # this implementation turned out to actually be slower than the first
-        raise DeprecationWarning
+        # raise DeprecationWarning
         # initial step
+        max_tokens = self.max_tokens
         vocab = set(list(text))
         tokenizer = Tokenizer(vocab)
         
@@ -120,7 +137,7 @@ class BytePairEncodingAlgorithm:
             bar.update(1)
             bar.set_postfix_str(f'added `{replacement_char}`')
         
-        return tokenizer
+        return tokenizer.vocab
     
     def fit(self, text): 
         """
