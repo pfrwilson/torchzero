@@ -67,7 +67,7 @@ class Tokenizer:
 
     def add_token(self, word, idx=None, exist_ok=False):
         if idx is None: 
-            idx = max(self.idx2token.keys(), default=0) + 1
+            idx = max(self.idx2token.keys(), default=-1) + 1
         if word in self.token2idx:
             if exist_ok:
                 return
