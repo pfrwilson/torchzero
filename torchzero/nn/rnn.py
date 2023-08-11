@@ -25,8 +25,6 @@ RNN:
   pages={2},
   year={2001}
 }
-
-
 """
 
 import numpy as np
