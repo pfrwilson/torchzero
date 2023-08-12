@@ -16,6 +16,7 @@ from torch import nn
 from torchzero.nn import MLP
 import torch
 import einops
+import typing as tp
 
 INF = torch.tensor(1e10)
 
@@ -263,41 +264,90 @@ class TransformerForSequenceGeneration(nn.Module):
     def __init__(
         self,
         vocab_size,
-        pad_token,
-        max_sequence_length=512,
-        n_layers=6,
-        n_heads=8,
-        d_model=512,
-        d_feed_forward=768,
-        dropout=0.1,
+        pad_idx,
+        n_layers,
+        n_heads,
+        d_model,
+        d_feed_forward,
+        dropout,
+        max_len=500,
+        pos_emb: tp.Literal['abs', 'rel'] = 'abs',
+        use_rel_pos_emb_key = False, 
     ):
-        self.token_embeddings = nn.Embedding(vocab_size, d_model, pad_token)
-        self.postition_embeddings = nn.Embedding(max_sequence_length, d_model)
-        self.transformer_encoder = TransformerEncoder(
-            n_layers=n_layers,
-            n_heads=n_heads,
-            d_model=d_model,
-            d_feed_forward=d_feed_forward,
-            dropout=dropout,
-        )
-        self.classifier = nn.Linear(d_model, vocab_size)
-
-        self._checked_padding = False
-        self.pad_token = pad_token
+        super().__init__()
+        self.n_layers = n_layers
+        self.n_heads = n_heads
         self.d_model = d_model
+        self.d_feed_forward = d_feed_forward
+        self.dropout = dropout
+
+        from torchzero.nn import TransformerEncoder, MLP, TransformerEncoderWithRelativePosEmbeddings
+
+        self.vocab_size = vocab_size
+        self.max_len = max_len
+        self.pos_emb = pos_emb
+        self.pad_idx = pad_idx
+
+        self.token_embeddings = torch.nn.Embedding(
+            num_embeddings=self.vocab_size,
+            embedding_dim=d_model,
+            padding_idx=pad_idx,
+        )
+
+        self.positional_embeddings = torch.nn.Embedding(
+            num_embeddings=max_len, 
+            embedding_dim=d_model
+        ) if pos_emb == 'abs' else None 
+
+        self.transformer = TransformerEncoder(
+            n_layers, n_heads, d_model, d_feed_forward, dropout
+        ) if pos_emb == 'abs' else TransformerEncoderWithRelativePosEmbeddings(
+            n_layers, n_heads, d_model, d_feed_forward, dropout,
+            key_only_for_pos_emb=use_rel_pos_emb_key,
+            max_distance=max_len, 
+        )
+
+        self.classifier = nn.Linear(d_model, self.vocab_size)
+
+        self.register_buffer('position_indices', torch.tensor(range(max_len)))
 
     def forward(self, X):
-        ...
-
-    def _create_mask(self, X):
+        """
+        input: batch of sequences of tokens, shape (B, N)
+        output: batch of sequences of class scores, shape (B, n, vocab_size)
+        """
         B, N = X.shape
-        padded_locations = X == self.pad_token
+
+        # we need to mask the future tokens
+        mask = torch.tril(torch.ones(N, N)).repeat(B, self.n_heads, 1, 1)
+
+        # extract token embeddings
+        X = self.token_embeddings(X)
+        B, N, D = X.shape
+        # get positions - positions are 0, 1, ..., max_len but when truncating
+        # we should also truncate from the left like n , ..., max_len
+        # *** TODO Changed the above to the opposite way ***
+        position_indices = self.position_indices
+        positions = position_indices[:N]
+        positions = positions.repeat(B, 1) # B, N positions 
+        
+        if self.pos_emb == 'abs': 
+            positional_embeddings = self.positional_embeddings(positions)
+            X = X + positional_embeddings
+
+        X, _ = self.transformer(X, mask)
+        X = self.classifier(X)
+
+        return X
 
 
 if __name__ == '__main__': 
-    model = TransformerEncoderWithRelativePosEmbeddings()
-    input = torch.randn(4, 64, 512)
+    model = TransformerForSequenceGeneration(
+        vocab_size=1000, pad_idx=0, n_layers=6, n_heads=8, d_model=512, d_feed_forward=768, dropout=0.1,
+    )
+    input = torch.randint(0, 1000, (64, 400))
     import torchinfo
     torchinfo.summary(
         model, input_data=input
     )
+    print(model(input).shape)
