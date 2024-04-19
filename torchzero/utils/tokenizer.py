@@ -233,16 +233,21 @@ class BytePairEncodingAlgorithm:
         self.allow_whitespace = allow_whitespace
         self.max_tokens = max_tokens
 
-    def fit_v2(self, text):
-        # this implementation turned out to actually be slower than the first
-        # raise DeprecationWarning
-        # initial step
+    def random_fit(self, text_iter, tokenizer=None, max_add=None):
         max_tokens = self.max_tokens
-        vocab = set(list(text))
-        tokenizer = Tokenizer(vocab)
+        tokenizer = tokenizer or Tokenizer([]) # start with empty tokenizer
 
         bar = tqdm(desc="Computing Vocabulary", total=(max_tokens - len(tokenizer)))
-        while len(tokenizer) <= max_tokens:
+        added = 0 
+        while len(tokenizer) <= max_tokens and (max_add is None or added <= max_add):
+            try: 
+                text = next(text_iter) # we have a batch of what could be brand new text
+            except StopIteration:
+                return tokenizer
+            
+            for character in set(text): 
+                tokenizer.add_token(character, exist_ok=True)
+            
             encoding = tokenizer.encode(text)
             bigram_frequencies = self.bigram_frequencies(encoding)
             bigrams = list(bigram_frequencies.keys())
@@ -272,9 +277,11 @@ class BytePairEncodingAlgorithm:
             bar.update(1)
             bar.set_postfix_str(f"added `{replacement_char}`")
 
-        return tokenizer.vocab
+            added += 1
 
-    def fit(self, text):
+        return tokenizer
+
+    def fit(self, text, tokenizer=None):
         """
         Uses the byte pair encoding algorithm to find a vocabulary for tokenizing the given
         text.
@@ -395,3 +402,5 @@ class BytePairEncodingAlgorithm:
             frequencies[bigram] += 1
 
         return frequencies
+
+

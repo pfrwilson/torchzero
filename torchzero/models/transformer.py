@@ -51,7 +51,7 @@ class MultiHeadAttention(nn.Module):
 
         self.scale = 1 / torch.sqrt(torch.tensor(d_k).float())
 
-    def forward(self, X, mask=None):
+    def forward(self, X, mask=None, return_attn=False):
         """
         X - tensor of shape batch_size, sequence_length, input_dim
         mask - tensor of shape batch_size, n_heads, sequence_length, sequence_length
@@ -69,7 +69,7 @@ class MultiHeadAttention(nn.Module):
 
         attn_scores = Q @ K_t * self.scale
         if mask is not None:
-            attn_scores[mask == 0] = -INF
+            attn_scores[mask == 0] = -INF.type(attn_scores.dtype)
 
         attn = attn_scores.softmax(-1)
         attn_weighted_values = attn @ V
@@ -80,8 +80,8 @@ class MultiHeadAttention(nn.Module):
         )
 
         layer_output = self.W_o(attn_weighted_values)
-        return layer_output, attn
-
+        if return_attn: return  layer_output, attn
+        else: return layer_output
 
 class MultiHeadAttentionWithRelativePositionalEmbeddings(nn.Module):
     def __init__(
@@ -91,11 +91,12 @@ class MultiHeadAttentionWithRelativePositionalEmbeddings(nn.Module):
         d_k: int | None = None,
         d_v: int | None = None,
         max_distance=512,
-        key_only_for_relative_pos_emb=False,
+        mode: tp.Literal['key', 'value', 'both'] = 'both'
     ):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
+        self.mode = mode
 
         self.d_k = d_k = d_k or (d_model // n_heads)
         self.d_v = d_v = d_v or (d_model // n_heads)
@@ -110,13 +111,20 @@ class MultiHeadAttentionWithRelativePositionalEmbeddings(nn.Module):
 
         self.max_distance = max_distance
         self.num_rel_embeddings = max_distance + (max_distance - 1)
-        self.P_k = nn.Parameter(
-            data=torch.randn(self.num_rel_embeddings, self.n_heads)
-        )
-        self.P_v = nn.Parameter(
-            data=torch.randn(self.num_rel_embeddings, n_heads, self.d_v)
-        ) 
-        self.key_only_for_relative_pos_emb = key_only_for_relative_pos_emb
+        
+        if self.mode == 'key' or self.mode == 'both':        
+            self.P_k = nn.Parameter(
+                data=torch.randn(self.num_rel_embeddings, self.n_heads)
+            )
+        else: 
+            self.P_k = None
+
+        if self.mode == 'value' or self.mode == 'both':
+            self.P_v = nn.Parameter(
+                data=torch.randn(self.num_rel_embeddings, n_heads, self.d_v)
+            ) 
+        else:
+            self.P_v = None
 
     def generate_rel_position_embedding_matrices(self, sequence_length):
         if sequence_length > self.max_distance:
@@ -128,18 +136,23 @@ class MultiHeadAttentionWithRelativePositionalEmbeddings(nn.Module):
         A_k = []
         A_v = []
         for i in range(sequence_length):
-            A_k.append(
-                self.P_k[zero_offset_idx - i : zero_offset_idx + sequence_length - i]
-            )
-            A_v.append(
-                self.P_v[zero_offset_idx - i : zero_offset_idx + sequence_length - i]
-            )
-        A_k = torch.stack(A_k)  # n_out, n_in, h
-        A_v = torch.stack(A_v)  # n_out, n_in, h, d_v
+            if self.mode == 'key' or self.mode == 'both':
+                A_k.append(
+                    self.P_k[zero_offset_idx - i : zero_offset_idx + sequence_length - i]
+                )
+            if self.mode == 'value' or self.mode == 'both':
+                A_v.append(
+                    self.P_v[zero_offset_idx - i : zero_offset_idx + sequence_length - i]
+                )
+
+        if self.mode == 'key' or self.mode == 'both':
+            A_k = torch.stack(A_k)
+        if self.mode == 'value' or self.mode == 'both':
+            A_v = torch.stack(A_v)
 
         return A_k, A_v
 
-    def forward(self, X, mask=None):
+    def forward(self, X, mask=None, return_attn=False):
         """
         X - tensor of shape batch_size, sequence_length, input_dim
         mask - tensor of shape batch_size, n_heads, sequence_length, sequence_length
@@ -155,17 +168,22 @@ class MultiHeadAttentionWithRelativePositionalEmbeddings(nn.Module):
         V = einops.rearrange(V, "b n (h d_v) -> b h n d_v", d_v=self.d_v)
 
         A_k, A_v = self.generate_rel_position_embedding_matrices(n_tokens)
-        A_k = einops.repeat(A_k, "n_out n_in h -> b n_out n_in h", b=B)
-        A_k = einops.rearrange(A_k, "b n_out n_in h -> b h n_out n_in")
+        if self.mode == 'key' or self.mode == 'both': 
+            A_k = einops.repeat(A_k, "n_out n_in h -> b n_out n_in h", b=B)
+            A_k = einops.rearrange(A_k, "b n_out n_in h -> b h n_out n_in")
 
-        attn_scores = (Q @ K_t + A_k) * self.scale
+        attn_scores = Q @ K_t
+        if self.mode == 'key' or self.mode == 'both':
+            attn_scores = attn_scores + A_k
+        attn_scores = attn_scores * self.scale
+
         if mask is not None:
-            attn_scores[mask == 0] = -INF
+            attn_scores[mask == 0] = -INF.type(attn_scores.dtype)
 
         attn = attn_scores.softmax(-1)
         attn_weighted_values = attn @ V  # b h n d_v
 
-        if not self.key_only_for_relative_pos_emb:
+        if self.mode == 'value' or self.mode == 'both':
             # compute value components from relative position embeddings
             A_v = einops.repeat(A_v, "n_out n_in h d_k -> b n_out n_in h d_k", b=B)
             A_v = einops.rearrange(A_v, "b n_out n_in h d_k -> b h n_out n_in d_k")
@@ -179,8 +197,10 @@ class MultiHeadAttentionWithRelativePositionalEmbeddings(nn.Module):
         )
 
         layer_output = self.W_o(attn_weighted_values)
-        return layer_output, attn
-
+        if return_attn:
+            return layer_output, attn
+        else:
+            return layer_output
 
 class TransformerEncoder(nn.Module):
     """
@@ -218,12 +238,16 @@ class TransformerEncoder(nn.Module):
             n_heads=self.n_heads,
         )
 
-    def forward(self, X, mask=None):
+    def forward(self, X, mask=None, return_attn=False):
         layer_outputs = []
         attentions = []
 
         for i in range(self.n_layers):
-            attn_layer_out, attn = self.attn_blocks[i](X, mask=mask)
+            if return_attn:
+                attn_layer_out, attn = self.attn_blocks[i](X, mask=mask, return_attn=True)
+            else:
+                attn_layer_out = self.attn_blocks[i](X, mask=mask)
+                attn = None
             X = self.attn_layernorms[i](X + attn_layer_out)
 
             ff_out = self.feed_forward_blocks[i](X)
@@ -233,8 +257,10 @@ class TransformerEncoder(nn.Module):
             layer_outputs.append(X)
             attentions.append(attn)
 
-        return X, {"attentions": attentions, "layer_outputs": layer_outputs}
-
+        if return_attn: 
+            return X, {"attentions": attentions, "layer_outputs": layer_outputs}
+        else:
+            return X
 
 class TransformerEncoderWithRelativePosEmbeddings(TransformerEncoder):
     def __init__(
@@ -244,19 +270,18 @@ class TransformerEncoderWithRelativePosEmbeddings(TransformerEncoder):
         d_model=512,
         d_feed_forward=768,
         dropout=0.1,
-        key_only_for_pos_emb=False,
         max_distance=512, 
+        rel_pos_emb_mode: tp.Literal['key', 'value', 'both'] = 'both',
     ):
-        self.key_only_for_pos_emb = key_only_for_pos_emb
         self.max_distance = max_distance
+        self.rel_pos_emb_mode = rel_pos_emb_mode
         super().__init__(
             n_layers, n_heads, d_model, d_feed_forward, dropout
         )
 
     def build_attn_layer(self):
         return MultiHeadAttentionWithRelativePositionalEmbeddings(
-            self.d_model, self.n_heads, max_distance=self.max_distance, 
-            key_only_for_relative_pos_emb=self.key_only_for_pos_emb
+            self.d_model, self.n_heads, max_distance=self.max_distance, mode=self.rel_pos_emb_mode
         )
 
 
@@ -272,7 +297,7 @@ class TransformerForSequenceGeneration(nn.Module):
         dropout,
         max_len=500,
         pos_emb: tp.Literal['abs', 'rel'] = 'abs',
-        use_rel_pos_emb_key = False, 
+        rel_pos_emb_mode: tp.Literal['key', 'value', 'both', None] = None, 
     ):
         super().__init__()
         self.n_layers = n_layers
@@ -303,8 +328,7 @@ class TransformerForSequenceGeneration(nn.Module):
             n_layers, n_heads, d_model, d_feed_forward, dropout
         ) if pos_emb == 'abs' else TransformerEncoderWithRelativePosEmbeddings(
             n_layers, n_heads, d_model, d_feed_forward, dropout,
-            key_only_for_pos_emb=use_rel_pos_emb_key,
-            max_distance=max_len, 
+            max_distance=max_len, rel_pos_emb_mode=rel_pos_emb_mode
         )
 
         self.classifier = nn.Linear(d_model, self.vocab_size)
@@ -324,9 +348,8 @@ class TransformerForSequenceGeneration(nn.Module):
         # extract token embeddings
         X = self.token_embeddings(X)
         B, N, D = X.shape
-        # get positions - positions are 0, 1, ..., max_len but when truncating
-        # we should also truncate from the left like n , ..., max_len
-        # *** TODO Changed the above to the opposite way ***
+        
+        # get positions - positions are 0, 1, ..., max_len but we only need 0, 1, ..., N
         position_indices = self.position_indices
         positions = position_indices[:N]
         positions = positions.repeat(B, 1) # B, N positions 
@@ -335,13 +358,22 @@ class TransformerForSequenceGeneration(nn.Module):
             positional_embeddings = self.positional_embeddings(positions)
             X = X + positional_embeddings
 
-        X, _ = self.transformer(X, mask)
+        X = self.transformer(X, mask)
         X = self.classifier(X)
 
         return X
 
 
 if __name__ == '__main__': 
+    model = TransformerForSequenceGeneration(
+        vocab_size=1000, pad_idx=0, n_layers=6, n_heads=8, d_model=512, d_feed_forward=768, dropout=0.1,
+    )
+    input = torch.randint(0, 1000, (64, 400))
+    import torchinfo
+    torchinfo.summary(
+        model, input_data=input
+    )
+    print(model(input).shape)
     model = TransformerForSequenceGeneration(
         vocab_size=1000, pad_idx=0, n_layers=6, n_heads=8, d_model=512, d_feed_forward=768, dropout=0.1,
     )
